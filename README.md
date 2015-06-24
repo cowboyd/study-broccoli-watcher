@@ -144,7 +144,120 @@ CHANGE: {"directory":"sample","graph":{"id":3,"description":"String","subtrees":
 ```
 
 
+### Blocking
 
-### How do I stop watching?
+Another thing I noticed right off the bat was that just by being
+present, the watcher, caused the process to block until it received
+`SIGINT`. In other words, I had to hit `ctrl-c` to make it
+quit. What's up with that? It seems like the desired behavior, but
+what triggers it? Is it the builder, or the watcher.
 
-### What is the addWatchDir thing about. Is it a public API?
+To find out, lets write a script that contains everything in
+`watcher.js` but without the actual wather instantiation.
+
+`experiments/is-it-the-builder.js`:
+```javascript
+var broccoli = require('broccoli');
+var tree = broccoli.loadBrocfile();
+var builder = new broccoli.Builder(tree);
+```
+
+which yields:
+```
+$ node experiments/is-it-the-builder.js                                                                                                                               ✱
+$
+```
+
+It exits immediately, so it must be the watcher. My guess is that it
+is related to
+[this call to `setTimetout()`](https://github.com/broccolijs/broccoli/blob/9923afe8f7c9ad7a05b5ebaf9a3233114214fdcd/lib/watcher.js#L69). I'm
+not a hardcore noder, but my guess is that the process will not quit
+as long as there is a remaining computation scheduled. In this case,
+the watcher is always scheduling the next check inside the current
+one. so there is never an opportunity for the process to wind down.
+
+### Is there a way to manually stop the watcher?
+
+There doesn't appeart to be an exit path from the watcher. There may
+be, but it is not apparent. Exploring the intersection of error
+handling and process control from a watching process is a separate
+line of inquiry. Right now, I'm angling for the karma plugin. To that
+end, i need a way to make sure that a build is complete *before* I do
+a test run. In other words, I have the following sequence.
+
+1. start the karma server (this initiates a build)
+1. invoke `karma run` at some later point. The build may not be
+complete.
+1. the build completes
+1. the test suite runs and reports back results.
+
+I need (2) or (3) to be able to happen in either order. Or, once the
+server is running:
+
+1. developer makes a change.
+1. build starts
+1. developer invokes `karma run`
+1. build completes
+1. test run begins.
+
+(3), and (4) could happen in any order, but (5) should only happen,
+once (4) is complete. Which sounds like a `Promise` is just what the
+doctor ordered, right? Let's see what happens with the promise api.
+
+Let's make a script that registers a promise handler.
+
+`experiments/promise-api.js`:
+```javascript
+var watcher = require('../watcher');
+
+watcher.then(function(hash) {
+  console.log('RESOVLED:', JSON.stringify(hash));
+});
+```
+
+invoking this:
+```
+$ node experiments/promise-api.js                                                                                                                                 ⏎ ✱ ◼
+RESOVLED: {"directory":"sample","graph":{"id":0,"description":"String","subtrees":[],"selfTime":0,"totalTime":0},"totalTime":0}
+```
+
+I guess it isn't a suprise that the resolved value of the promise is
+the same as the argument to the event handler. Now let's check what
+happens if we touch the file:
+
+```
+$ sample/touch.me
+```
+
+```
+$ node experiments/promise-api.js                                                                                                                                 ⏎ ✱ ◼
+RESOVLED: {"directory":"sample","graph":{"id":0,"description":"String","subtrees":[],"selfTime":0,"totalTime":0},"totalTime":0}
+```
+
+Aha! and this is what I want... no matter how many times I touch the
+file, it only logs out the RESOLVED for the very first build. That
+way, in my karma plugin, I'll have a custom executor that will wait
+until the *current* build finishes, before actually executing the test
+suite.
+
+## Conclusions
+
+#### The Bad
+
+It's poorly documented. There is no clear way to stop a watcher from
+watching other than via a SIGINT. Which APIs are public and which are
+private is unclear. E.g. I'm pretty sure I shouldn't be calling
+`addWatchDir()` directly, but that isn't clear when approaching the
+class with zero context.
+
+#### The Good
+
+Broccoli Watcher definitely provides the primitives I need to make a
+robust karma plugin. By building on a low level Promise-like api, it
+allows you to synchronize imperative actions with a build, but also
+provides for a purely reactive configuration via events.
+
+The litmus test of good software is that it allows you to use it
+without modification, and that's definitely the case here.
+
+Let the karma pipe dream continue!
