@@ -242,7 +242,7 @@ suite.
 
 ## Conclusions
 
-#### The Bad
+#### The Initially Confusing
 
 It's poorly documented. There is no clear way to stop a watcher from
 watching other than via a SIGINT. Which APIs are public and which are
